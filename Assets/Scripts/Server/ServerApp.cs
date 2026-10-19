@@ -110,7 +110,7 @@ namespace RemoteCenter
             {
                 float height = Mathf.Max(_log.preferredHeight+20f, 40f);
                 _logContent.sizeDelta = new Vector2(0f, height);
-                Debug.Log("Log height:"+height+" | _log.preferredHeight:"+_log.preferredHeight);
+                //Debug.Log("Log height:"+height+" | _log.preferredHeight:"+_log.preferredHeight);
             }
             if (_logScroll != null && stickToBottom) _logScroll.verticalNormalizedPosition = 0f;
         }
@@ -414,13 +414,20 @@ namespace RemoteCenter
                 ? string.Join("、", names)
                 : string.Join("、", names.GetRange(0, 3)) + $" 等 {names.Count} 个";
 
+            int uploadedImageCount = 0;
+            foreach (string file in files)
+            {
+                if (IsImageFile(file)) uploadedImageCount++;
+            }
+            string kind = uploadedImageCount == files.Count ? "张图片" : "个视频";
+
             _fileInfo.text = files.Count == 1
                 ? $"{files[0]}\n大小: {FormatMB(total)}"
-                : $"已选 {files.Count} 张图片（共 {FormatMB(total)}）：{nameSummary}";
+                : $"已选 {files.Count} {kind}（共 {FormatMB(total)}）：{nameSummary}";
             _sendButton.interactable = true;
             AppendLog(files.Count == 1
                 ? $"已选择文件: {nameSummary}（{FormatMB(total)}）"
-                : $"已选择 {files.Count} 张图片（共 {FormatMB(total)}）：{nameSummary}");
+                : $"已选择 {files.Count} {kind}（共 {FormatMB(total)}）：{nameSummary}");
         }
 
         void OnSendClicked()
@@ -441,11 +448,13 @@ namespace RemoteCenter
             {
                 if (IsImageFile(file)) imageCount++;
             }
+            bool allImages = imageCount == _selectedFiles.Count;
+            bool allVideos = imageCount == 0;
 
-            // 分流：单视频 / 单张图片 / 多张图片批次；视频与图片混合则拒绝
-            if (_selectedFiles.Count > 1 && imageCount != _selectedFiles.Count)
+            // 分流：全图片 → 图片轮播批次；全视频（1..N）→ 视频列表（单循环/多轮播）；混合则拒绝
+            if (!allImages && !allVideos)
             {
-                AppendLog("多选时只能选择图片；一次只能发送一个视频或若干张图片");
+                AppendLog("视频与图片不能混合发送；请只选择图片或只选择视频");
                 return;
             }
 
@@ -456,17 +465,19 @@ namespace RemoteCenter
             string target = _targetEndpoint == null ? "全部客户端" : _targetEndpoint;
             float interval = ParseSlideshowInterval();
 
-            if (_selectedFiles.Count == 1 && imageCount == 0)
-            {
-                AppendLog($"开始发送视频到 {target}: {Path.GetFileName(_selectedFiles[0])}");
-                if (_targetEndpoint == null) _server.SendToClients(_selectedFiles[0]);
-                else _server.SendToEndpoint(_targetEndpoint, _selectedFiles[0]);
-            }
-            else
+            if (allImages)
             {
                 AppendLog($"开始发送 {_selectedFiles.Count} 张图片到 {target}（每 {interval:0.#} 秒轮播）");
                 if (_targetEndpoint == null) _server.SendImagesToClients(_selectedFiles.ToArray(), interval);
                 else _server.SendImagesToEndpoint(_targetEndpoint, _selectedFiles.ToArray(), interval);
+            }
+            else
+            {
+                AppendLog(_selectedFiles.Count == 1
+                    ? $"开始发送视频到 {target}: {Path.GetFileName(_selectedFiles[0])}"
+                    : $"开始发送 {_selectedFiles.Count} 个视频到 {target}（列表顺序循环播放）");
+                if (_targetEndpoint == null) _server.SendVideosToClients(_selectedFiles.ToArray());
+                else _server.SendVideosToEndpoint(_targetEndpoint, _selectedFiles.ToArray());
             }
         }
     }

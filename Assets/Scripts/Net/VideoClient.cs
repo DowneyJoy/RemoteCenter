@@ -25,11 +25,16 @@ namespace RemoteCenter
         int _batchTotal;
         float _batchInterval;
         readonly List<string> _batchPaths = new List<string>();
+        
+        // 视频列表批次接收状态（仅接收线程访问）
+        string _videoBatchId;
+        int _videoBatchTotal;
+        readonly List<string> _videoBatchPaths = new List<string>();
 
         public event Action<string> StateChanged;
         public event Action<string, long> ReceivingStarted;          // 文件名, 总大小
         public event Action<long, long> ReceivingProgress;          // 已接收, 总大小
-        public event Action<string> VideoReceived;                   // 单个视频接收完成（落盘路径）
+        public event Action<List<string>> VideosReceived;           // 视频列表接收完成（单个视频为单元素列表）
         public event Action<List<string>, float> ImagesReceived;    // 图片批次全部接收完成（路径列表, 轮播间隔）
         public event Action ServerDisconnect;                        // 服务端请求断开（此后停止重连，等待下次初始化）
         public event Action<string> Error;
@@ -258,7 +263,7 @@ namespace RemoteCenter
             if (ok)
             {
                 if (isImage) OnImageReceived(header, finalPath);
-                else VideoReceived?.Invoke(finalPath);
+                else OnVideoReceived(header, finalPath);
             }
             else
             {
@@ -290,6 +295,27 @@ namespace RemoteCenter
                 _batchTotal = 0;
                 _batchPaths.Clear();
                 ImagesReceived?.Invoke(paths, interval);
+            }
+        }
+        
+        void OnVideoReceived(VideoHeaderMessage header, string path)
+        {
+            // 视频列表批次：单个视频 total=1，收齐后一次性上报（客户端单循环/多轮播）
+            if (header.batchId != _videoBatchId)
+            {
+                _videoBatchId = header.batchId;
+                _videoBatchPaths.Clear();
+                _videoBatchTotal = Math.Max(1, header.total);
+            }
+            _videoBatchPaths.Add(path);
+
+            if (_videoBatchPaths.Count >= _videoBatchTotal)
+            {
+                var paths = new List<string>(_videoBatchPaths);
+                _videoBatchId = null;
+                _videoBatchTotal = 0;
+                _videoBatchPaths.Clear();
+                VideosReceived?.Invoke(paths);
             }
         }
 

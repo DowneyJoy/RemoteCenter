@@ -45,7 +45,7 @@ namespace RemoteCenter
             catch { }
             return preferred ?? fallback ?? "127.0.0.1";
         }
-        
+
         static bool HasGateway(NetworkInterface nic)
         {
             try
@@ -60,7 +60,6 @@ namespace RemoteCenter
             catch { }
             return false;
         }
-
 
         static bool IsPreferredNic(NetworkInterface nic)
         {
@@ -126,79 +125,78 @@ namespace RemoteCenter
                 Debug.LogWarning("[InitCommandSender] 初始化命令发送失败: " + ex.Message);
             }
         }
-        
         /// <summary>
-        /// 获取本机局域网 IPv4：优先 192.168.x.x，找不到回退通用检测，仍找不到返回 null
-        /// </summary>
-        public static string GetLocal192168Ipv4()
+    /// 获取本机局域网 IPv4：优先 192.168.x.x，找不到回退通用检测，仍找不到返回 null
+    /// </summary>
+    public static string GetLocal192168Ipv4()
+    {
+        try
         {
-            try
+            var interfaces = NetworkInterface.GetAllNetworkInterfaces();
+
+            // 第一轮：优先物理网卡（以太网 / Wi-Fi）上的 192.168 地址
+            foreach (var nic in interfaces)
             {
-                var interfaces = NetworkInterface.GetAllNetworkInterfaces();
-
-                // 第一轮：优先物理网卡（以太网 / Wi-Fi）
-                foreach (var nic in interfaces)
-                {
-                    if (!IsPreferredNicTemp(nic)) continue;
-                    string ip = TryGet192168Ipv4(nic);
-                    if (ip != null) return ip;
-                }
-
-                // 第二轮：其他网卡作为兜底
-                foreach (var nic in interfaces)
-                {
-                    string ip = TryGet192168Ipv4(nic);
-                    if (ip != null) return ip;
-                }
-            }
-            catch { }
-
-            // 回退：通用局域网检测（任意网段，带网关的物理网卡优先）
-            return GetPrimaryLanIpv4();
-        }
-
-        /// <summary>
-        /// 是否为优先网卡（有线或无线，且处于启用状态）
-        /// </summary>
-        private static bool IsPreferredNicTemp(NetworkInterface nic)
-        {
-            if (nic == null) return false;
-            if (nic.OperationalStatus != OperationalStatus.Up) return false;
-
-            switch (nic.NetworkInterfaceType)
-            {
-                case NetworkInterfaceType.Ethernet:
-                case NetworkInterfaceType.GigabitEthernet:
-                case NetworkInterfaceType.Wireless80211:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        /// <summary>
-        /// 尝试从指定网卡中取一个 192.168 开头的 IPv4
-        /// </summary>
-        private static string TryGet192168Ipv4(NetworkInterface nic)
-        {
-            if (nic == null) return null;
-            if (nic.OperationalStatus != OperationalStatus.Up) return null;
-
-            var props = nic.GetIPProperties();
-            if (props == null) return null;
-
-            foreach (var addr in props.UnicastAddresses)
-            {
-                if (addr == null || addr.Address == null) continue;
-                if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue; // 只取 IPv4
-                if (IPAddress.IsLoopback(addr.Address)) continue;                      // 排除回环
-
-                string ip = addr.Address.ToString();
-                if (ip.StartsWith("192.168."))
-                    return ip;
+                if (!IsPreferredNicTemp(nic)) continue;
+                string ip = TryGet192168Ipv4(nic);
+                if (ip != null) return ip;
             }
 
-            return null;
+            // 第二轮：其他网卡上的 192.168 地址
+            foreach (var nic in interfaces)
+            {
+                string ip = TryGet192168Ipv4(nic);
+                if (ip != null) return ip;
+            }
         }
+        catch { }
+
+        // 回退：通用局域网检测（任意网段，带网关的物理网卡优先）
+        return GetPrimaryLanIpv4();
+    }
+
+    /// <summary>
+    /// 是否为优先网卡（有线或无线，且处于启用状态）
+    /// </summary>
+    private static bool IsPreferredNicTemp(NetworkInterface nic)
+    {
+        if (nic == null) return false;
+        if (nic.OperationalStatus != OperationalStatus.Up) return false;
+
+        switch (nic.NetworkInterfaceType)
+        {
+            case NetworkInterfaceType.Ethernet:
+            case NetworkInterfaceType.GigabitEthernet:
+            case NetworkInterfaceType.Wireless80211:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// 尝试从指定网卡中取一个 192.168 开头的 IPv4
+    /// </summary>
+    private static string TryGet192168Ipv4(NetworkInterface nic)
+    {
+        if (nic == null) return null;
+        if (nic.OperationalStatus != OperationalStatus.Up) return null;
+
+        var props = nic.GetIPProperties();
+        if (props == null) return null;
+
+        foreach (var addr in props.UnicastAddresses)
+        {
+            if (addr == null || addr.Address == null) continue;
+            if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue; // 只取 IPv4
+            if (IPAddress.IsLoopback(addr.Address)) continue;                      // 排除回环
+
+            string ip = addr.Address.ToString();
+            if (ip.StartsWith("192.168."))
+                return ip;
+        }
+
+        return null;
+    }
     }
 }

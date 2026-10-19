@@ -125,16 +125,16 @@ namespace RemoteCenter
             }
         }
 
-        /// 发送单个视频给全部已连接客户端。
-        public void SendToClients(string filePath)
+        /// 发送视频列表（1..N 个）给全部已连接客户端；客户端单个循环、多个顺序轮播。
+        public void SendVideosToClients(string[] filePaths)
         {
-            StartSend(null, BuildVideoBatch(filePath));
+            StartSend(null, BuildVideoBatch(filePaths));
         }
 
-        /// 发送单个视频给指定端点客户端。
-        public void SendToEndpoint(string endpoint, string filePath)
+        /// 发送视频列表给指定端点客户端。
+        public void SendVideosToEndpoint(string endpoint, string[] filePaths)
         {
-            StartSend(endpoint, BuildVideoBatch(filePath));
+            StartSend(endpoint, BuildVideoBatch(filePaths));
         }
 
         /// 发送图片批次（1..N 张）给全部已连接客户端；interval 为轮播间隔秒数。
@@ -157,26 +157,26 @@ namespace RemoteCenter
                 Log?.Invoke("已有传输进行中，请等待完成后再断开客户端");
                 return;
             }
-            var thread = new Thread(() => 
+            var thread = new Thread(() =>
+            {
+                List<ClientConnection> targets;
+                lock (_gate)
                 {
-                    List<ClientConnection> targets;
-                    lock (_gate)
-                    {
-                        _clients.RemoveAll(c => !c.Tcp.Connected);
-                        targets = new List<ClientConnection>(_clients.FindAll(c => c.Address == addressIp));
-                    }
-                    if (targets.Count == 0)
-                    {
-                        Log?.Invoke($"没有 IP 为 {addressIp} 的已连接客户端");
-                        return;
-                    }
-                    foreach (var conn in targets) RequestDisconnect(conn);
-                    Log?.Invoke($"已请求断开 {addressIp} 的 {targets.Count} 个客户端");
-                })
-                { IsBackground = true, Name = "VideoServer.Disconnect" };    
+                    _clients.RemoveAll(c => !c.Tcp.Connected);
+                    targets = new List<ClientConnection>(_clients.FindAll(c => c.Address == addressIp));
+                }
+                if (targets.Count == 0)
+                {
+                    Log?.Invoke($"没有 IP 为 {addressIp} 的已连接客户端");
+                    return;
+                }
+                foreach (var conn in targets) RequestDisconnect(conn);
+                Log?.Invoke($"已请求断开 {addressIp} 的 {targets.Count} 个客户端");
+            })
+            { IsBackground = true, Name = "VideoServer.Disconnect" };
             thread.Start();
         }
-        
+
         /// 请求所有已连接客户端断开。
         public void DisconnectAll()
         {
@@ -186,25 +186,25 @@ namespace RemoteCenter
                 return;
             }
             var thread = new Thread(() =>
+            {
+                List<ClientConnection> targets;
+                lock (_gate)
                 {
-                    List<ClientConnection> targets;
-                    lock (_gate)
-                    {
-                        _clients.RemoveAll(c => !c.Tcp.Connected);
-                        targets = new List<ClientConnection>(_clients);
-                    }
-                    if (targets.Count == 0)
-                    {
-                        Log?.Invoke("当前没有已连接的客户端");
-                        return;
-                    }
-                    foreach (var conn in targets) RequestDisconnect(conn);
-                    Log?.Invoke($"已请求断开全部 {targets.Count} 个客户端");
-                })
-                { IsBackground = true, Name = "VideoServer.DisconnectAll" };
+                    _clients.RemoveAll(c => !c.Tcp.Connected);
+                    targets = new List<ClientConnection>(_clients);
+                }
+                if (targets.Count == 0)
+                {
+                    Log?.Invoke("当前没有已连接的客户端");
+                    return;
+                }
+                foreach (var conn in targets) RequestDisconnect(conn);
+                Log?.Invoke($"已请求断开全部 {targets.Count} 个客户端");
+            })
+            { IsBackground = true, Name = "VideoServer.DisconnectAll" };
             thread.Start();
         }
-        
+
         void RequestDisconnect(ClientConnection conn)
         {
             try
@@ -222,18 +222,25 @@ namespace RemoteCenter
             NotifyClientsChanged();
         }
 
-        static FileBatch BuildVideoBatch(string filePath)
+        static FileBatch BuildVideoBatch(string[] filePaths)
         {
-            var batch = new FileBatch
+            var paths = new List<string>(filePaths);
+            var sizes = new long[paths.Count];
+            long total = 0;
+            for (int i = 0; i < paths.Count; i++)
+            {
+                sizes[i] = new FileInfo(paths[i]).Length;
+                total += sizes[i];
+            }
+            return new FileBatch
             {
                 MediaType = "video",
-                Paths = new[] { filePath },
-                Sizes = new[] { new FileInfo(filePath).Length },
+                Paths = paths.ToArray(),
+                Sizes = sizes,
+                TotalBytes = total,
                 Interval = 0f,
-                BatchId = null
+                BatchId = DateTime.Now.ToString("yyyyMMddHHmmssfff")
             };
-            batch.TotalBytes = batch.Sizes[0];
-            return batch;
         }
 
         static FileBatch BuildImageBatch(string[] filePaths, float interval)
@@ -364,7 +371,12 @@ namespace RemoteCenter
                     {
                         okTargets++;
                         if (batch.MediaType == "video")
-                            Log?.Invoke($"已成功发送到 {conn.Endpoint}: {Path.GetFileName(batch.Paths[0])}");
+                        {
+                            if (batch.Paths.Length > 1)
+                                Log?.Invoke($"{conn.Endpoint} 视频列表接收完成（{batch.Paths.Length} 个，顺序循环播放）");
+                            else
+                                Log?.Invoke($"已成功发送到 {conn.Endpoint}: {Path.GetFileName(batch.Paths[0])}");
+                        }
                         else
                             Log?.Invoke($"{conn.Endpoint} 图片批次接收完成（{batch.Paths.Length} 张，每 {batch.Interval:0.#} 秒轮播）");
                     }

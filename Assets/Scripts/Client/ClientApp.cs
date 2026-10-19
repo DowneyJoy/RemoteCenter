@@ -15,7 +15,8 @@ namespace RemoteCenter
         class PlaylistData
         {
             public string mode;       // "video" 或 "images"
-            public string videoFile;
+            public string videoFile;  // 旧版单视频字段（读取兼容）
+            public List<string> videoFiles;
             public List<string> imageFiles;
             public float interval;
         }
@@ -46,6 +47,12 @@ namespace RemoteCenter
         float _slideshowTimer;
         bool _slideshowActive;
 
+        // 视频列表状态（仅主线程访问）：单个视频循环播放，多个视频顺序轮播
+        List<string> _videoPaths;
+        int _videoIndex;
+        bool _videoPlaylistActive;
+        bool _preparingVideo;
+        
         volatile string _host = "127.0.0.1";
         string _netState = "未连接";
         string _playState = "-";
@@ -89,13 +96,13 @@ namespace RemoteCenter
                 _receiveSlider.value = total > 0 ? (float)((double)received / total) : 0f;
                 _receivePercent.text = total > 0 ? $"{received * 100 / total}%" : "0%";
             });
-            _client.VideoReceived += path => Post(() =>
+            _client.VideosReceived += paths => Post(() =>
             {
                 isPrepared = false;
                 _receivePanel.SetActive(false);
-                PlayVideo(path);
-                SavePlaylistVideo(path);
-                CleanupUnreferencedMedia(path);
+                StartVideoPlaylist(paths);
+                SavePlaylistVideos(paths);
+                CleanupUnreferencedMedia(paths);
             });
             _client.ImagesReceived += (paths, interval) => Post(() =>
             {
@@ -202,6 +209,14 @@ namespace RemoteCenter
                 }
             }
             
+            // 视频列表轮播兜底：个别平台收不到 loopPointReached 事件时按播放状态推进
+            if (_videoPlaylistActive && !_slideshowActive && !_preparingVideo
+                && _videoPaths != null && _videoPaths.Count > 1
+                && _player != null && _player.isPrepared && !_player.isPlaying)
+            {
+                AdvanceVideo();
+            }
+            
             // 视频控制
             if (_player.url != null)
             {
@@ -227,6 +242,14 @@ namespace RemoteCenter
                     VolumeDown();
             }
 
+        }
+        
+        /// 切换到视频列表中的下一个（环形）。
+        void AdvanceVideo()
+        {
+            if (_videoPaths == null || _videoPaths.Count < 2) return;
+            _videoIndex = (_videoIndex + 1) % _videoPaths.Count;
+            PlayCurrentVideo();
         }
 
         void OnDestroy()
@@ -411,10 +434,12 @@ namespace RemoteCenter
             _player.SetTargetAudioSource(0, _audio);
             _player.prepareCompleted += OnPrepareCompleted;
             _player.errorReceived += OnVideoError;
+            _player.loopPointReached += OnLoopPointReached;
         }
 
         void OnPrepareCompleted(VideoPlayer source)
         {
+            _preparingVideo = false;
             // 已切换到幻灯片模式时不恢复视频播放
             if (!_slideshowActive) source.Play();
             isPrepared = true;
@@ -422,25 +447,47 @@ namespace RemoteCenter
 
         void OnVideoError(VideoPlayer source, string message)
         {
+            _preparingVideo = false;
             _playState = "播放错误";
             RefreshStatus();
             Debug.LogWarning("[ClientApp] 视频播放错误: " + message);
         }
-
-        /// 启动媒体优先级：playlist.json 上次媒体 > 旧版接收视频 > 随包默认视频。
+        
+        void OnLoopPointReached(VideoPlayer source)
+        {
+            // 多视频列表：当前视频播完切下一个（环形）；单视频由 isLooping 自然循环
+            if (_preparingVideo || _slideshowActive || !_videoPlaylistActive) return;
+            if (_videoPaths == null || _videoPaths.Count < 2) return;
+            AdvanceVideo();
+        }
+        
         void PlayStartupMedia()
         {
             var playlist = LoadPlaylist();
             if (playlist != null)
             {
-                if (playlist.mode == "video" && !string.IsNullOrEmpty(playlist.videoFile) && File.Exists(playlist.videoFile))
+                if (playlist.mode == "video")
                 {
-                    PlayVideo(playlist.videoFile);
-                    return;
+                    var videos = new List<string>();
+                    if (playlist.videoFiles != null)
+                    {
+                        foreach (string file in playlist.videoFiles)
+                        {
+                            if (File.Exists(file)) videos.Add(file);
+                        }
+                    }
+                    if (videos.Count == 0 && !string.IsNullOrEmpty(playlist.videoFile) && File.Exists(playlist.videoFile))
+                    {
+                        videos.Add(playlist.videoFile); // 旧版单视频字段
+                    }
+                    if (videos.Count > 0)
+                    {
+                        StartVideoPlaylist(videos);
+                        return;
+                    }
                 }
                 if (playlist.mode == "images" && playlist.imageFiles != null && playlist.imageFiles.Count > 0)
                 {
-                    isPrepared = false;
                     var existing = new List<string>();
                     foreach (string file in playlist.imageFiles)
                     {
@@ -458,28 +505,26 @@ namespace RemoteCenter
             string latest = _client.FindLatestReceivedVideo();
             if (!string.IsNullOrEmpty(latest) && File.Exists(latest))
             {
-                PlayVideo(latest);
+                StartVideoPlaylist(new List<string> { latest });
                 return;
             }
 
 #if UNITY_ANDROID
-            // Android 的 StreamingAssets 位于 APK 内部，无法用 File.IO 检查；
-            // VideoPlayer 通过 "!assets" 形式的 URL 可直接从 APK 播放（mp4 在 APK 中默认不压缩）
-            //PlayVideo(Application.dataPath + "!assets/Videos/videos.mp4", true);
-            PlayVideo(Application. streamingAssetsPath+ "/Videos/videos.mp4", true);
+            // Android：随包默认视频（jar: URI 原样传给 VideoPlayer）
+            StartVideoPlaylist(new List<string> { Application.streamingAssetsPath + "/Videos/videos.mp4" });
 #else
 #if UNITY_EDITOR
             string editorDefault = Path.Combine(Application.dataPath, "Videos", "videos.mp4");
             if (File.Exists(editorDefault))
             {
-                PlayVideo(editorDefault);
+                StartVideoPlaylist(new List<string> { editorDefault });
                 return;
             }
 #endif
             string streaming = Path.Combine(Application.streamingAssetsPath, "Videos", "videos.mp4");
             if (File.Exists(streaming))
             {
-                PlayVideo(streaming);
+                StartVideoPlaylist(new List<string> { streaming });
                 return;
             }
 
@@ -488,18 +533,37 @@ namespace RemoteCenter
 #endif
         }
 
-        void PlayVideo(string absolutePath, bool rawUrl = false)
+        /// 播放视频列表：单个视频循环；多个视频按顺序轮播（播完最后一个回到第一个）。
+        void StartVideoPlaylist(List<string> paths)
         {
+            if (paths == null || paths.Count == 0) return;
             _slideshowActive = false;
+            _videoPlaylistActive = true;
+            _videoPaths = paths;
+            _videoIndex = 0;
+            PlayCurrentVideo();
+        }
+
+        void PlayCurrentVideo()
+        {
+            if (_videoPaths == null || _videoPaths.Count == 0) return;
+            string path = _videoPaths[_videoIndex];
+            bool singleLoop = _videoPaths.Count == 1;
+
             _rawImage.texture = _renderTexture;
             _fitter.aspectRatio = 16f / 9f;
-            _playState = Path.GetFileName(absolutePath) + "（循环播放）";
+            _playState = singleLoop
+                ? Path.GetFileName(path) + "（循环播放）"
+                : $"视频 {_videoIndex + 1}/{_videoPaths.Count}: {Path.GetFileName(path)}";
             RefreshStatus();
 
+            _preparingVideo = true;
             _player.Stop();
+            _player.isLooping = singleLoop;
             _player.source = VideoSource.Url;
-            // APK 内 assets 路径必须原样传给 VideoPlayer；普通文件使用 file:// URI
-            _player.url = rawUrl ? absolutePath : "file:///" + absolutePath.Replace('\\', '/');
+            // APK 内 assets（jar: URI 或 !assets 形式）必须原样传给 VideoPlayer；普通文件使用 file:// URI
+            bool rawUrl = path.StartsWith("jar:", StringComparison.OrdinalIgnoreCase) || path.Contains("!assets");
+            _player.url = rawUrl ? path : "file:///" + path.Replace('\\', '/');
             _player.audioOutputMode = VideoAudioOutputMode.AudioSource;
             _player.SetTargetAudioSource(0, _audio);
             _player.Prepare();
@@ -507,6 +571,7 @@ namespace RemoteCenter
 
         void StartSlideshow(List<string> paths, float interval)
         {
+            _videoPlaylistActive = false;
             _slideshowActive = true;
             _slideshowPaths = paths;
             _slideshowInterval = interval > 0f ? interval : 5f;
@@ -543,9 +608,9 @@ namespace RemoteCenter
             RefreshStatus();
         }
 
-        void SavePlaylistVideo(string videoFile)
+        void SavePlaylistVideos(List<string> files)
         {
-            SavePlaylist(new PlaylistData { mode = "video", videoFile = videoFile, imageFiles = null, interval = 0f });
+            SavePlaylist(new PlaylistData { mode = "video", videoFile = null, videoFiles = new List<string>(files), imageFiles = null, interval = 0f });
         }
 
         void SavePlaylistImages(List<string> files, float interval)
